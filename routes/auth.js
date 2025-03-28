@@ -1,58 +1,109 @@
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const pool = require('../db');
 
-// Register
+// Load bcryptjs and log any issues
+let bcrypt;
+try {
+  bcrypt = require('bcryptjs');
+  console.log('bcryptjs loaded successfully');
+} catch (error) {
+  console.error('Error loading bcryptjs:', error);
+  throw error;
+}
+
+const { user } = require('../db');
+
+// Register a new user
 router.post('/register', async (req, res) => {
-  const { username, password } = req.body;
-  try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const result = await pool.query(
-      'INSERT INTO users (username, password, role, subscription) VALUES ($1, $2, $3, $4) RETURNING *',
-      [username, hashedPassword, 'user', 'free']
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error('Error during registration:', err);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
+  const { username, password, role, subscription } = req.body;
 
-// Login
-router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
   try {
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    const user = result.rows[0];
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-      return res.status(400).json({ message: 'Invalid credentials' });
+    console.log('Register attempt for username:', username);
+
+    // Check if the user already exists
+    console.log('Checking if user exists:', username);
+    const existingUser = await user.findOne({ where: { username } });
+    if (existingUser) {
+      console.log('User already exists:', username);
+      return res.status(400).json({ message: 'Username already exists' });
     }
+
+    // Hash the password
+    console.log('Hashing password for user:', username);
+    const hashedPassword = await bcrypt.hash(password, 10);
+    console.log('Password hashed successfully:', hashedPassword);
+
+    // Create the new user
+    console.log('Creating new user:', username);
+    const newUser = await user.create({
+      username,
+      password: hashedPassword,
+      role: role || 'user',
+      subscription: subscription || 'free',
+    });
+    console.log('New user created:', newUser.toJSON());
+
+    // Generate a JWT token
+    console.log('Generating JWT token for user:', username);
     const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role, subscription: user.subscription },
+      { id: newUser.id, username: newUser.username, role: newUser.role, subscription: newUser.subscription },
       process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
-    res.json({ token, role: user.role, subscription: user.subscription });
-  } catch (err) {
-    console.error('Error during login:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.log('JWT token generated:', token);
+
+    // Send the response
+    console.log('Sending response with token for user:', username);
+    res.json({ token });
+    console.log('Response sent successfully');
+  } catch (error) {
+    console.error('Error during registration:', error);
+    res.status(500).json({ message: 'Error registering user', error: error.message });
   }
 });
 
-// Subscribe (mock payment)
-router.post('/subscribe', async (req, res) => {
-  const { userId } = req.body;
+// Login a user
+router.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+
   try {
-    const result = await pool.query(
-      'UPDATE users SET subscription = $1 WHERE id = $2 RETURNING *',
-      ['pro', userId]
+    console.log('Login attempt for username:', username);
+
+    // Find the user by username
+    console.log('Querying user table for username:', username);
+    const foundUser = await user.findOne({ where: { username } });
+    console.log('Found user:', foundUser ? foundUser.toJSON() : null);
+    if (!foundUser) {
+      console.log('User not found:', username);
+      return res.status(400).json({ message: 'Invalid username or password' });
+    }
+
+    // Compare the password
+    console.log('Comparing password for user:', username);
+    const isMatch = await bcrypt.compare(password, foundUser.password);
+    console.log('Password match:', isMatch);
+    if (!isMatch) {
+      console.log('Password mismatch for user:', username);
+      return res.status(400).json({ message: 'Invalid username or password' });
+    }
+
+    // Generate a JWT token
+    console.log('Generating JWT token for user:', username);
+    const token = jwt.sign(
+      { id: foundUser.id, username: foundUser.username, role: foundUser.role, subscription: foundUser.subscription },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
     );
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error('Error during subscription:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.log('JWT token generated:', token);
+
+    // Send the response
+    console.log('Sending response with token for user:', username);
+    res.json({ token });
+    console.log('Response sent successfully');
+  } catch (error) {
+    console.error('Error during login:', error);
+    res.status(500).json({ message: 'Error during login', error: error.message });
   }
 });
 
