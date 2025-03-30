@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcrypt');
 const { authenticateToken } = require('../middleware/auth');
-const { user, tile } = require('../db');
+const { user, tile, userTile, project } = require('../db');
+const { Op } = require('sequelize');
 
 // Middleware to ensure only admins can access these routes
 const checkAdmin = (req, res, next) => {
@@ -12,22 +13,32 @@ const checkAdmin = (req, res, next) => {
   next();
 };
 
-// GET /stats - Fetch admin statistics (number of tiles and users)
+// GET /stats - Fetch admin statistics (number of tiles, users, custom tiles, and projects)
 router.get('/stats', authenticateToken, checkAdmin, async (req, res) => {
   try {
     console.log('Fetching admin statistics for user:', req.user.id);
 
-    // Fetch number of tiles
+    // Fetch number of default tiles
     const tileCount = await tile.count();
-    console.log('Total tiles in database:', tileCount);
+    console.log('Total default tiles in database:', tileCount);
 
     // Fetch number of users
     const userCount = await user.count();
     console.log('Total users in database:', userCount);
 
+    // Fetch number of custom tiles (userTile)
+    const customTileCount = await userTile.count();
+    console.log('Total custom tiles in database:', customTileCount);
+
+    // Fetch number of saved projects
+    const projectCount = await project.count();
+    console.log('Total saved projects in database:', projectCount);
+
     res.json({
       tileCount,
       userCount,
+      customTileCount,
+      projectCount,
     });
   } catch (error) {
     console.error('Error fetching admin statistics:', error.message);
@@ -36,15 +47,41 @@ router.get('/stats', authenticateToken, checkAdmin, async (req, res) => {
   }
 });
 
-// GET /users - Fetch all users
+// GET /users - Fetch all users with pagination and search
 router.get('/users', authenticateToken, checkAdmin, async (req, res) => {
   try {
-    console.log('Fetching all users for admin:', req.user.id);
-    const users = await user.findAll({
-      attributes: ['id', 'email', 'role', 'subscription'], // Exclude sensitive fields like password
+    console.log('Fetching users for admin:', req.user.id);
+
+    // Get pagination and search parameters from query
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || '';
+    const offset = (page - 1) * limit;
+
+    // Build the where clause for search
+    const where = search
+      ? {
+          email: {
+            [Op.iLike]: `%${search}%`, // Case-insensitive search
+          },
+        }
+      : {};
+
+    // Fetch users with pagination and search
+    const { count, rows } = await user.findAndCountAll({
+      attributes: ['id', 'email', 'role', 'subscription'],
+      where,
+      limit,
+      offset,
     });
-    console.log('Returning users:', users.length);
-    res.json(users);
+
+    console.log(`Returning ${rows.length} users for page ${page}, limit ${limit}, search: ${search}`);
+    res.json({
+      users: rows,
+      totalUsers: count,
+      totalPages: Math.ceil(count / limit),
+      currentPage: page,
+    });
   } catch (error) {
     console.error('Error fetching users:', error.message);
     console.error('Stack trace:', error.stack);
@@ -89,9 +126,8 @@ router.post('/users', authenticateToken, checkAdmin, async (req, res) => {
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Create the new user, using email as username
+    // Create the new user
     const newUser = await user.create({
-      username: email, // Use email as username to satisfy NOT NULL constraint
       email,
       password: hashedPassword,
       role,
@@ -203,6 +239,54 @@ router.delete('/users/:id', authenticateToken, checkAdmin, async (req, res) => {
     console.error('Error deleting user:', error.message);
     console.error('Stack trace:', error.stack);
     res.status(500).json({ message: 'Error deleting user', error: error.message });
+  }
+});
+
+// POST /users/bulk-delete - Delete multiple users
+router.post('/users/bulk-delete', authenticateToken, checkAdmin, async (req, res) => {
+  const { userIds } = req.body;
+
+  try {
+    console.log(`Received request to bulk delete users by admin ${req.user.id}:`, userIds);
+
+    // Validate request body
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      console.log('Validation failed: userIds must be a non-empty array');
+      return res.status(400).json({ message: 'userIds must be a non-empty array' });
+    }
+
+    // Check if any of the users to delete is the admin themselves
+    if (userIds.includes(req.user.id)) {
+      console.log('Admin attempted to delete their own account:', req.user.id);
+      return res.status(403).json({ message: 'Cannot delete your own account' });
+    }
+
+    // Check if all users exist
+    const existingUsers = await user.findAll({
+      where: { id: userIds },
+    });
+
+    if (existingUsers.length !== userIds.length) {
+      console.log('Some users not found:', userIds);
+      return res.status(404).json({ message: 'One or more users not found' });
+    }
+
+    // Delete the users
+    const result = await user.destroy({
+      where: { id: userIds },
+    });
+
+    if (result === 0) {
+      console.log('Bulk deletion failed, no rows affected');
+      return res.status(500).json({ message: 'Failed to delete users' });
+    }
+
+    console.log(`Successfully deleted ${result} users`);
+    res.json({ message: `Successfully deleted ${result} users` });
+  } catch (error) {
+    console.error('Error during bulk delete:', error.message);
+    console.error('Stack trace:', error.stack);
+    res.status(500).json({ message: 'Error during bulk delete', error: error.message });
   }
 });
 
